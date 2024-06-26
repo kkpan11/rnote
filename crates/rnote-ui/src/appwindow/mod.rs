@@ -35,6 +35,16 @@ impl RnAppWindow {
     }
 
     #[allow(unused)]
+    pub(crate) fn save_in_progress(&self) -> bool {
+        self.property::<bool>("save-in-progress")
+    }
+
+    #[allow(unused)]
+    pub(crate) fn set_save_in_progress(&self, save_in_progress: bool) {
+        self.set_property("save-in-progress", save_in_progress.to_value());
+    }
+
+    #[allow(unused)]
     pub(crate) fn autosave(&self) -> bool {
         self.property::<bool>("autosave")
     }
@@ -364,6 +374,23 @@ impl RnAppWindow {
                     .canvas()
             })
             .any(|c| c.unsaved_changes())
+    }
+
+    pub(crate) fn tabs_any_saves_in_progress(&self) -> bool {
+        self.overlays()
+            .tabview()
+            .pages()
+            .snapshot()
+            .iter()
+            .map(|o| {
+                o.downcast_ref::<adw::TabPage>()
+                    .unwrap()
+                    .child()
+                    .downcast_ref::<RnCanvasWrapper>()
+                    .unwrap()
+                    .canvas()
+            })
+            .any(|c| c.save_in_progress())
     }
 
     pub(crate) fn tabs_query_file_opened(

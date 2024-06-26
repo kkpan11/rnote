@@ -17,6 +17,8 @@ pub(crate) struct RnAppWindow {
     pub(crate) autosave_source_id: RefCell<Option<glib::SourceId>>,
     pub(crate) periodic_configsave_source_id: RefCell<Option<glib::SourceId>>,
 
+    pub(crate) save_in_progress: Cell<bool>,
+    pub(crate) save_in_progress_toast: RefCell<Option<adw::Toast>>,
     pub(crate) autosave: Cell<bool>,
     pub(crate) autosave_interval_secs: Cell<u32>,
     pub(crate) righthanded: Cell<bool>,
@@ -24,6 +26,7 @@ pub(crate) struct RnAppWindow {
     pub(crate) respect_borders: Cell<bool>,
     pub(crate) touch_drawing: Cell<bool>,
     pub(crate) focus_mode: Cell<bool>,
+    pub(crate) close_in_progress: Cell<bool>,
 
     #[template_child]
     pub(crate) main_header: TemplateChild<RnMainHeader>,
@@ -44,6 +47,8 @@ impl Default for RnAppWindow {
             autosave_source_id: RefCell::new(None),
             periodic_configsave_source_id: RefCell::new(None),
 
+            save_in_progress: Cell::new(false),
+            save_in_progress_toast: RefCell::new(None),
             autosave: Cell::new(true),
             autosave_interval_secs: Cell::new(super::RnAppWindow::AUTOSAVE_INTERVAL_DEFAULT),
             righthanded: Cell::new(true),
@@ -51,6 +56,7 @@ impl Default for RnAppWindow {
             respect_borders: Cell::new(false),
             touch_drawing: Cell::new(false),
             focus_mode: Cell::new(false),
+            close_in_progress: Cell::new(false),
 
             main_header: TemplateChild::<RnMainHeader>::default(),
             split_view: TemplateChild::<adw::OverlaySplitView>::default(),
@@ -112,6 +118,9 @@ impl ObjectImpl for RnAppWindow {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
             vec![
+                glib::ParamSpecBoolean::builder("save-in-progress")
+                    .default_value(false)
+                    .build(),
                 glib::ParamSpecBoolean::builder("autosave")
                     .default_value(false)
                     .build(),
@@ -142,6 +151,7 @@ impl ObjectImpl for RnAppWindow {
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
+            "save-in-progress" => self.save_in_progress.get().to_value(),
             "autosave" => self.autosave.get().to_value(),
             "autosave-interval-secs" => self.autosave_interval_secs.get().to_value(),
             "righthanded" => self.righthanded.get().to_value(),
@@ -155,6 +165,12 @@ impl ObjectImpl for RnAppWindow {
 
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         match pspec.name() {
+            "save-in-progress" => {
+                let save_in_progress = value
+                    .get::<bool>()
+                    .expect("The value needs to be of type `bool`");
+                self.save_in_progress.replace(save_in_progress);
+            }
             "autosave" => {
                 let autosave = value
                     .get::<bool>()
@@ -220,17 +236,47 @@ impl ObjectImpl for RnAppWindow {
 impl WidgetImpl for RnAppWindow {}
 
 impl WindowImpl for RnAppWindow {
-    // Save window state right before the window will be closed
     fn close_request(&self) -> glib::Propagation {
         let obj = self.obj().to_owned();
+        if self.close_in_progress.get() {
+            return glib::Propagation::Stop;
+        }
 
-        // Save current doc
-        if obj.tabs_any_unsaved_changes() {
-            glib::spawn_future_local(clone!(@weak obj as appwindow => async move {
-                dialogs::dialog_close_window(&obj).await;
-            }));
+        if obj.tabs_any_saves_in_progress() {
+            obj.connect_notify_local(Some("save-in-progress"), move |appwindow, _| {
+                if !appwindow.save_in_progress() {
+                    if appwindow.tabs_any_unsaved_changes() {
+                        appwindow.imp().close_in_progress.set(false);
+                        appwindow.main_header().headerbar().set_sensitive(true);
+                        appwindow.sidebar().headerbar().set_sensitive(true);
+                        if let Some(toast) = appwindow.imp().save_in_progress_toast.take() {
+                            toast.dismiss();
+                        }
+
+                        glib::spawn_future_local(clone!(@weak appwindow => async move {
+                            dialogs::dialog_close_window(&appwindow).await;
+                        }));
+                    } else {
+                        appwindow.close_force();
+                    }
+                }
+            });
+            self.close_in_progress.set(true);
+            self.main_header.headerbar().set_sensitive(false);
+            self.sidebar.headerbar().set_sensitive(false);
+            obj.overlays().dispatch_toast_text_singleton(
+                &gettext("Saves are in progress, waiting before closing.."),
+                None,
+                &mut self.save_in_progress_toast.borrow_mut(),
+            );
         } else {
-            obj.close_force();
+            if obj.tabs_any_unsaved_changes() {
+                glib::spawn_future_local(clone!(@weak obj as appwindow => async move {
+                    dialogs::dialog_close_window(&appwindow).await;
+                }));
+            } else {
+                obj.close_force();
+            }
         }
 
         // Inhibit (Overwrite) the default handler. This handler is then responsible for destroying the window.
